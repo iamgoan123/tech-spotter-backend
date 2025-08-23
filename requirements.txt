@@ -1,0 +1,6 @@
+File 2: requirements.txt
+This file lists the Python libraries needed for our project.
+fastapi
+uvicorn
+pydantic
+httpx
