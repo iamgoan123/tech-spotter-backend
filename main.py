@@ -1,12 +1,12 @@
 # File: main.py
-# This is the final version with real analysis logic.
+# This is the upgraded version with advanced detection logic.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
-from bs4 import BeautifulSoup # We've added BeautifulSoup for parsing HTML
-import re # We've added the regular expression module
+from bs4 import BeautifulSoup
+import re
 
 class URLPayload(BaseModel):
     url: str
@@ -25,36 +25,48 @@ app.add_middleware(
 
 def analyze_html(html_content: str):
     """
-    This function takes HTML content and looks for technology clues.
+    This function takes HTML content and looks for technology clues,
+    extracting specific IDs where possible.
     """
     soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # We'll store our findings here. The values will be lists of strings.
     detected = {
-        "analytics": [],
+        "google_tags": [],
         "frameworks": [],
-        "security": [],
+        "web_technologies": [],
         "compliance": [] 
     }
 
-    # --- Detection Logic ---
+    # --- NEW & IMPROVED DETECTION LOGIC ---
 
-    # 1. Google Analytics (GA4 and UA)
-    if re.search(r'G-[A-Z0-9]{10}', html_content):
-        detected["analytics"].append({"name": "Google Analytics 4", "detected": "Yes"})
-    if re.search(r'UA-[0-9]{4,9}-[0-9]{1,4}', html_content):
-        detected["analytics"].append({"name": "Universal Analytics", "detected": "Yes"})
+    # 1. Find all Google-related IDs (GA4, GTM, Ads, etc.)
+    # This pattern looks for G-, AW-, DC-, and GTM- prefixes.
+    google_ids = re.findall(r'(G-[A-Z0-9]{10}|UA-[0-9]{4,9}-[0-9]{1,4}|GTM-[A-Z0-9]{7}|AW-[0-9]{9}|DC-[0-9]{7})', html_content)
+    # Add unique IDs to our results
+    if google_ids:
+        detected["google_tags"].extend(list(set(google_ids))) # set() removes duplicates
 
-    # 2. Google Tag Manager
-    if "googletagmanager.com/gtm.js" in html_content:
-        detected["analytics"].append({"name": "Google Tag Manager", "detected": "Yes"})
+    # 2. Check for dataLayer
+    if "dataLayer = [" in html_content or "window.dataLayer = window.dataLayer || []" in html_content:
+        detected["google_tags"].append("dataLayer Detected")
 
-    # 3. React
-    # A simple check for the common 'root' div or react scripts
-    if soup.find(id='root') or soup.find('script', src=re.compile(r'react-dom')):
-         detected["frameworks"].append({"name": "React", "detected": "Yes"})
+    # 3. Next.js Framework
+    if soup.find('script', id='__NEXT_DATA__'):
+        detected["frameworks"].append("Next.js")
 
-    # 4. OneTrust (Compliance)
+    # 4. React Framework (as a fallback)
+    # We check if Next.js wasn't found, as Next.js is built on React.
+    if "Next.js" not in detected["frameworks"] and (soup.find(id='root') or soup.find('script', src=re.compile(r'react-dom'))):
+         detected["frameworks"].append("React")
+
+    # 5. Webpack (simple check)
+    if "webpack" in html_content:
+        detected["web_technologies"].append("Webpack")
+        
+    # 6. OneTrust (Compliance)
     if "cdn.cookielaw.org" in html_content:
-        detected["compliance"].append({"name": "OneTrust CMP", "detected": "Yes"})
+        detected["compliance"].append("OneTrust CMP")
 
     return detected
 
@@ -63,19 +75,28 @@ def analyze_html(html_content: str):
 async def analyze_url(payload: URLPayload):
     target_url = payload.url
     
+    if not target_url.startswith(('http://', 'https://')):
+        target_url = 'https://' + target_url
+
     try:
         async with httpx.AsyncClient() as client:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
             response = await client.get(target_url, headers=headers, follow_redirects=True, timeout=15.0)
             
             if response.status_code == 200:
-                # Now we pass the HTML to our new analysis function
                 html = response.text
                 detected_technologies = analyze_html(html)
                 
-                # Check for HSTS Header (Security)
+                # Add a new category for server-side tech
+                detected_technologies["server_info"] = []
+
                 if 'strict-transport-security' in response.headers:
-                    detected_technologies["security"].append({"name": "HSTS Enabled", "detected": "Yes"})
+                    detected_technologies["server_info"].append("HSTS Enabled")
+                
+                # Check for CDN headers
+                server_header = response.headers.get('server', '').lower()
+                if 'akamai' in server_header:
+                    detected_technologies["server_info"].append("Akamai CDN")
 
                 return {
                     "message": "Analysis complete!",
