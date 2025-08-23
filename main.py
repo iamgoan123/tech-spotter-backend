@@ -1,5 +1,5 @@
 # File: main.py
-# This version extracts specific IDs and has a richer data structure.
+# This version scans linked JavaScript files for the most accurate detection.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +7,8 @@ from pydantic import BaseModel
 import httpx
 from bs4 import BeautifulSoup
 import re
+import asyncio
+from urllib.parse import urljoin, urlparse
 
 class URLPayload(BaseModel):
     url: str
@@ -23,16 +25,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- FINGERPRINT LIBRARY V2 ---
-# Now includes specific patterns for extracting IDs.
+# --- FINGERPRINT LIBRARY V4 ---
+# Expanded with more technologies and CMS detectors.
 TECHNOLOGY_FINGERPRINTS = {
     "Analytics": [
         {"name": "Microsoft Clarity", "pattern": r'clarity.ms', "type": "presence"},
+        {"name": "Hotjar", "pattern": r'static.hotjar.com', "type": "presence"},
     ],
     "Google Tags": [
+        {"name": "Google Tag Manager (Loader)", "pattern": r'googletagmanager.com/gtm.js', "type": "presence"},
         {"name": "Google Analytics GA4", "pattern": r'G-[A-Z0-9]{10}', "type": "extract_all"},
         {"name": "Universal Analytics", "pattern": r'UA-[0-9]{4,9}-[0-9]{1,4}', "type": "extract_all"},
-        {"name": "Google Tag Manager", "pattern": r'GTM-[A-Z0-9]{7}', "type": "extract_all"},
+        {"name": "Google Tag Manager ID", "pattern": r'GTM-[A-Z0-9]{7}', "type": "extract_all"},
         {"name": "Google Ads", "pattern": r'AW-[0-9]{9}', "type": "extract_all"},
         {"name": "DoubleClick Floodlight", "pattern": r'DC-[0-9]{7}', "type": "extract_all"},
     ],
@@ -48,8 +52,14 @@ TECHNOLOGY_FINGERPRINTS = {
         {"name": "jQuery", "pattern": r'jquery.js|jquery.min.js', "type": "presence"},
         {"name": "GSAP", "pattern": r'gsap.min.js', "type": "presence"},
     ],
-    "Page Builders": [
+    "Page Builders & CMS": [
         {"name": "Webflow", "pattern": 'data-wf-page', "type": "html_attribute"},
+        {"name": "Shopify", "pattern": r'\.myshopify\.com', "type": "presence"},
+        {"name": "WordPress", "pattern": r'/wp-content/', "type": "presence"},
+    ],
+    "A/B Testing": [
+        {"name": "VWO", "pattern": r'dev.visualwebsiteoptimizer.com', "type": "presence"},
+        {"name": "Optimizely", "pattern": r'cdn.optimizely.com', "type": "presence"},
     ],
     "Miscellaneous": [
         {"name": "Webpack", "pattern": 'webpack', "type": "presence"},
@@ -63,54 +73,50 @@ TECHNOLOGY_FINGERPRINTS = {
     ]
 }
 
-def analyze_content(html_content, headers):
+def analyze_combined_content(full_content, headers):
     detected = {}
-    soup = BeautifulSoup(html_content, 'html.parser')
+    soup = BeautifulSoup(full_content, 'html.parser')
 
     for category, technologies in TECHNOLOGY_FINGERPRINTS.items():
         found_in_category = []
         for tech in technologies:
-            name = tech["name"]
-            pattern = tech["pattern"]
-            tech_type = tech["type"]
-            
-            found = False
-            details = []
+            name, pattern, tech_type = tech["name"], tech["pattern"], tech["type"]
+            found, details = False, []
 
             if tech_type == "presence":
-                if re.search(pattern, html_content, re.IGNORECASE):
-                    found = True
+                if re.search(pattern, full_content, re.IGNORECASE): found = True
             elif tech_type == "extract_all":
-                matches = re.findall(pattern, html_content)
+                matches = re.findall(pattern, full_content)
                 if matches:
-                    found = True
-                    details = list(set(matches)) # Use set to get unique IDs
+                    found, details = True, list(set(matches))
             elif tech_type == "script_id":
-                if soup.find('script', id=pattern):
-                    found = True
+                if soup.find('script', id=pattern): found = True
             elif tech_type == "div_id":
-                if soup.find(id=pattern) and "Next.js" not in [f["name"] for f in found_in_category]:
-                    found = True
+                if soup.find(id=pattern) and "Next.js" not in [f.get("name") for f in found_in_category]: found = True
             elif tech_type == "html_attribute":
-                if soup.find(attrs={pattern: True}):
-                    found = True
+                if soup.find(attrs={pattern: True}): found = True
             elif tech_type == "header":
-                if pattern in headers:
-                    found = True
+                if pattern in headers: found = True
             elif tech_type == "server_header":
-                if pattern in headers.get('server', ''):
-                    found = True
+                if pattern in headers.get('server', ''): found = True
             
             if found:
                 tech_result = {"name": name}
-                if details:
-                    tech_result["ids"] = details
+                if details: tech_result["ids"] = details
                 found_in_category.append(tech_result)
         
         if found_in_category:
             detected[category] = found_in_category
             
     return detected
+
+async def fetch_script_content(client, url):
+    try:
+        script_res = await client.get(url, timeout=10.0)
+        script_res.raise_for_status()
+        return script_res.text
+    except Exception:
+        return "" # Return empty string if a script fails to load
 
 @app.post("/analyze")
 async def analyze_url(payload: URLPayload):
@@ -120,17 +126,30 @@ async def analyze_url(payload: URLPayload):
         target_url = 'https://' + target_url
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=False, http2=True) as client:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
             response = await client.get(target_url, headers=headers, follow_redirects=True, timeout=20.0)
+            response.raise_for_status()
             
-            if response.status_code == 200:
-                html = response.text
-                response_headers = {k.lower(): v.lower() for k, v in response.headers.items()}
-                detected_technologies = analyze_content(html, response_headers)
-                return { "message": "Advanced analysis complete!", "detected_technologies": detected_technologies }
-            else:
-                return {"error": f"Could not fetch the URL. Status code: {response.status_code}"}
+            html = response.text
+            response_headers = {k.lower(): v.lower() for k, v in response.headers.items()}
+            
+            # --- NEW SCRIPT ANALYSIS LOGIC ---
+            soup = BeautifulSoup(html, 'html.parser')
+            scripts = soup.find_all('script', src=True)
+            script_urls = [urljoin(str(response.url), script['src']) for script in scripts]
+            
+            # Fetch all scripts concurrently
+            script_tasks = [fetch_script_content(client, url) for url in script_urls]
+            script_contents = await asyncio.gather(*script_tasks)
+            
+            # Combine HTML and all script contents for a full analysis
+            full_content_to_analyze = html + "\n".join(script_contents)
+            
+            detected_technologies = analyze_combined_content(full_content_to_analyze, response_headers)
+            
+            return { "message": "Deep analysis complete!", "detected_technologies": detected_technologies }
+
     except Exception as e:
         return {"error": f"An error occurred: {str(e)}"}
 
