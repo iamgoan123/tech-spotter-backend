@@ -1,5 +1,5 @@
 # File: main.py
-# This is the upgraded version with advanced detection logic.
+# The ultimate upgrade with a comprehensive detection library.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,51 +23,83 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def analyze_html(html_content: str):
-    """
-    This function takes HTML content and looks for technology clues,
-    extracting specific IDs where possible.
-    """
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # We'll store our findings here. The values will be lists of strings.
-    detected = {
-        "google_tags": [],
-        "frameworks": [],
-        "web_technologies": [],
-        "compliance": [] 
+# --- COMPREHENSIVE FINGERPRINT LIBRARY ---
+# We define patterns for various technologies.
+TECHNOLOGY_FINGERPRINTS = {
+    "Analytics": {
+        "Google Analytics GA4": (r'G-[A-Z0-9]{10}', 'html'),
+        "Universal Analytics": (r'UA-[0-9]{4,9}-[0-9]{1,4}', 'html'),
+        "Microsoft Clarity": (r'clarity.ms', 'html'),
+    },
+    "Tag Managers": {
+        "Google Tag Manager": (r'GTM-[A-Z0-9]{7}', 'html'),
+    },
+    "Advertising": {
+        "Facebook Pixel": (r'connect.facebook.net', 'html'),
+        "LinkedIn Insight Tag": (r'snap.licdn.com/li.lms-analytics', 'html'),
+        "Quora Pixel": (r'qevents.js', 'html'),
+        "Twitter Ads": (r'static.ads-twitter.com', 'html'),
+        "DoubleClick Floodlight": (r'fls.doubleclick.net', 'html'),
+    },
+    "Frameworks": {
+        "Next.js": ('__NEXT_DATA__', 'script_id'),
+        "React": ('root', 'div_id'),
+    },
+    "JavaScript Libraries": {
+        "jQuery": (r'jquery.js|jquery.min.js', 'html'),
+        "GSAP": (r'gsap.min.js', 'html'),
+        "core-js": (r'core-js', 'html'),
+        "Three.js": (r'three.min.js', 'html'),
+    },
+    "Page Builders": {
+        "Webflow": ('data-wf-page', 'html_attribute'),
+    },
+    "Miscellaneous": {
+        "Webpack": ('webpack', 'html'),
+        "dataLayer": (r'dataLayer\s*=\s*\[', 'html'),
+    },
+    "Security": {
+        "HSTS": ('strict-transport-security', 'header'),
+    },
+    "CDN": {
+        "Cloudflare": ('cloudflare', 'server_header'),
+        "jsDelivr": ('cdn.jsdelivr.net', 'html'),
     }
+}
 
-    # --- NEW & IMPROVED DETECTION LOGIC ---
+def analyze_content(html_content, headers):
+    detected = {}
 
-    # 1. Find all Google-related IDs (GA4, GTM, Ads, etc.)
-    # This pattern looks for G-, AW-, DC-, and GTM- prefixes.
-    google_ids = re.findall(r'(G-[A-Z0-9]{10}|UA-[0-9]{4,9}-[0-9]{1,4}|GTM-[A-Z0-9]{7}|AW-[0-9]{9}|DC-[0-9]{7})', html_content)
-    # Add unique IDs to our results
-    if google_ids:
-        detected["google_tags"].extend(list(set(google_ids))) # set() removes duplicates
-
-    # 2. Check for dataLayer
-    if "dataLayer = [" in html_content or "window.dataLayer = window.dataLayer || []" in html_content:
-        detected["google_tags"].append("dataLayer Detected")
-
-    # 3. Next.js Framework
-    if soup.find('script', id='__NEXT_DATA__'):
-        detected["frameworks"].append("Next.js")
-
-    # 4. React Framework (as a fallback)
-    # We check if Next.js wasn't found, as Next.js is built on React.
-    if "Next.js" not in detected["frameworks"] and (soup.find(id='root') or soup.find('script', src=re.compile(r'react-dom'))):
-         detected["frameworks"].append("React")
-
-    # 5. Webpack (simple check)
-    if "webpack" in html_content:
-        detected["web_technologies"].append("Webpack")
+    for category, technologies in TECHNOLOGY_FINGERPRINTS.items():
+        found_in_category = []
+        for tech, (pattern, scope) in technologies.items():
+            if scope == 'html':
+                if re.search(pattern, html_content, re.IGNORECASE):
+                    found_in_category.append(tech)
+            elif scope == 'script_id':
+                soup = BeautifulSoup(html_content, 'html.parser')
+                if soup.find('script', id=pattern):
+                    found_in_category.append(tech)
+            elif scope == 'div_id':
+                soup = BeautifulSoup(html_content, 'html.parser')
+                if soup.find(id=pattern):
+                    # Avoid double-counting if Next.js (which uses React) is found
+                    if "Next.js" not in found_in_category:
+                        found_in_category.append(tech)
+            elif scope == 'html_attribute':
+                soup = BeautifulSoup(html_content, 'html.parser')
+                if soup.find(attrs={pattern: True}):
+                    found_in_category.append(tech)
+            elif scope == 'header':
+                if pattern in headers:
+                    found_in_category.append(tech)
+            elif scope == 'server_header':
+                if pattern in headers.get('server', ''):
+                    found_in_category.append(tech)
         
-    # 6. OneTrust (Compliance)
-    if "cdn.cookielaw.org" in html_content:
-        detected["compliance"].append("OneTrust CMP")
-
+        if found_in_category:
+            detected[category] = found_in_category
+            
     return detected
 
 
@@ -79,27 +111,18 @@ async def analyze_url(payload: URLPayload):
         target_url = 'https://' + target_url
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=False) as client: # Added verify=False for flexibility
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-            response = await client.get(target_url, headers=headers, follow_redirects=True, timeout=15.0)
+            response = await client.get(target_url, headers=headers, follow_redirects=True, timeout=20.0)
             
             if response.status_code == 200:
                 html = response.text
-                detected_technologies = analyze_html(html)
+                response_headers = {k.lower(): v.lower() for k, v in response.headers.items()}
                 
-                # Add a new category for server-side tech
-                detected_technologies["server_info"] = []
-
-                if 'strict-transport-security' in response.headers:
-                    detected_technologies["server_info"].append("HSTS Enabled")
-                
-                # Check for CDN headers
-                server_header = response.headers.get('server', '').lower()
-                if 'akamai' in server_header:
-                    detected_technologies["server_info"].append("Akamai CDN")
+                detected_technologies = analyze_content(html, response_headers)
 
                 return {
-                    "message": "Analysis complete!",
+                    "message": "Advanced analysis complete!",
                     "detected_technologies": detected_technologies
                 }
             else:
