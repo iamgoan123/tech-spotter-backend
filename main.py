@@ -48,9 +48,9 @@ TECHNOLOGY_FINGERPRINTS = {
     ],
 }
 
-def analyze_combined_content(full_content, headers):
+def analyze_content(html_content, headers):
     detected = {}
-    soup = BeautifulSoup(full_content, 'html.parser')
+    soup = BeautifulSoup(html_content, 'html.parser')
 
     for category, technologies in TECHNOLOGY_FINGERPRINTS.items():
         found_in_category = []
@@ -60,9 +60,9 @@ def analyze_combined_content(full_content, headers):
 
             try:
                 if tech_type == "presence":
-                    if re.search(pattern, full_content, re.IGNORECASE): found = True
+                    if re.search(pattern, html_content, re.IGNORECASE): found = True
                 elif tech_type == "extract_all":
-                    matches = re.findall(pattern, full_content)
+                    matches = re.findall(pattern, html_content)
                     if matches:
                         found, details = True, list(set(matches))
                 elif tech_type == "script_id":
@@ -86,14 +86,6 @@ def analyze_combined_content(full_content, headers):
             
     return detected
 
-async def fetch_script_content(client, url):
-    try:
-        script_res = await client.get(url, timeout=10.0)
-        script_res.raise_for_status()
-        return script_res.text
-    except Exception:
-        return ""
-
 @app.post("/analyze")
 async def analyze_url(payload: URLPayload):
     target_url = payload.url
@@ -111,18 +103,10 @@ async def analyze_url(payload: URLPayload):
             html = response.text
             response_headers = {k.lower(): v.lower() for k, v in response.headers.items()}
             
-            soup = BeautifulSoup(html, 'html.parser')
-            scripts = soup.find_all('script', src=True)
-            script_urls = [urljoin(str(response.url), script['src']) for script in scripts]
+            # We now only analyze the main HTML for speed and stability
+            detected_technologies = analyze_content(html, response_headers)
             
-            script_tasks = [fetch_script_content(client, url) for url in script_urls]
-            script_contents = await asyncio.gather(*script_tasks)
-            
-            full_content_to_analyze = html + "\n".join(script_contents)
-            
-            detected_technologies = analyze_combined_content(full_content_to_analyze, response_headers)
-            
-            return { "message": "Deep analysis complete!", "detected_technologies": detected_technologies }
+            return { "message": "Analysis complete!", "detected_technologies": detected_technologies }
 
     except Exception as e:
         return {"error": f"An error occurred: {str(e)}"}
